@@ -41,7 +41,8 @@ export interface Token {
 }
 
 export interface CompilerError {
-  phase: "Lexical" | "Syntax" | "Semantic" | "IR" | "Optimize" | "Runtime";
+  /** "Limit" = input too large for the compiler; "Internal" = an unexpected compiler failure. */
+  phase: "Lexical" | "Syntax" | "Semantic" | "IR" | "Optimize" | "Runtime" | "Limit" | "Internal";
   message: string;
   line: number;
   column: number;
@@ -85,6 +86,12 @@ export interface Quad {
   op: string;
   arg1: string | null;
   arg2: string | null;
+  /**
+   * Extra operands: the items of a `list`, the value of a `setindex`, or a one-word marker
+   * for the executor: "assign" (a user assignment: updates the variable that owns the name,
+   * local or global; an unmarked `=` always writes a local) or "int" (exact int arithmetic,
+   * so overflow is an error).
+   */
   args?: string[];
   srcLine?: number;
   eventId: number;

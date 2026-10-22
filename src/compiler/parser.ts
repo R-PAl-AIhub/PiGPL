@@ -12,16 +12,56 @@ import {
 import { EventLog } from "./events.ts";
 import type { CompilerError, SourceLoc, Token } from "./types.ts";
 
-const EOF: Token = {
-  type: "EOF",
-  lexeme: "",
-  value: "",
-  line: 0,
-  column: 0,
-  start: 0,
-  end: 0,
-  eventId: 0,
+/** Deepest nesting of brackets and blocks. Each level costs about ten parser calls. */
+export const MAX_NESTING = 100;
+/** Longest chain of operators, calls or indexes in one expression. Later phases recurse over it. */
+export const MAX_AST_DEPTH = 1000;
+
+/** Thrown to stop parsing at once when the input is too deep to process safely. */
+class ParseLimit extends Error {
+  loc: SourceLoc;
+  constructor(message: string, loc: SourceLoc) {
+    super(message);
+    this.loc = loc;
+  }
+}
+
+/** How a token type reads in an error message. */
+const TOKEN_NAMES: Record<string, string> = {
+  LPAREN: "'('",
+  RPAREN: "')'",
+  LBRACE: "'{'",
+  RBRACE: "'}'",
+  LBRACKET: "'['",
+  RBRACKET: "']'",
+  COMMA: "','",
+  COLON: "':'",
+  ASSIGN: "'='",
+  ARROW: "'->'",
+  IN: "'in'",
+  LET: "'let'",
+  IF: "'if'",
+  WHILE: "'while'",
+  FOR: "'for'",
+  FN: "'fn'",
+  RETURN: "'return'",
+  PRINT: "'print'",
+  IDENTIFIER: "a name",
+  TYPE: "a type (int, float, bool, string or list)",
+  INTEGER: "a whole number",
+  FLOATNUM: "a decimal number",
+  STRING: "a string",
 };
+
+const nameOf = (type: string) => TOKEN_NAMES[type] ?? type.toLowerCase();
+const foundText = (t: Token) => (t.type === "EOF" ? "the end of the program" : `'${t.lexeme}'`);
+
+/** Why a token cannot start a statement. */
+function unexpectedStatement(t: Token): string {
+  if (t.type === "RBRACE") return "Unexpected '}': there is no matching '{'";
+  if (t.type === "ELSE" || t.type === "ELIF") return `'${t.lexeme}' has no matching 'if'`;
+  return `A statement cannot start with ${foundText(t)}. A statement starts with let, if, while, for, fn, return, print, a name, or a call`;
+}
 
 const STMT_START = new Set([
   "LET",
@@ -44,6 +84,20 @@ export function parse(
   const errors: CompilerError[] = [];
   let pos = 0;
 
+  // The end-of-input token sits just after the last real token, so an error such as a
+  // missing bracket points at the end of the program instead of at line 1.
+  const last = tokens[tokens.length - 1];
+  const EOF: Token = {
+    type: "EOF",
+    lexeme: "",
+    value: "",
+    line: last ? last.line : 1,
+    column: last ? last.column + (last.end - last.start) : 1,
+    start: last ? last.end : 0,
+    end: last ? last.end : 0,
+    eventId: 0,
+  };
+
   const peek = (offset = 0): Token => tokens[pos + offset] ?? EOF;
   const at = (...types: string[]) => types.includes(peek().type);
 
@@ -54,6 +108,9 @@ export function parse(
     locOf(start.line, start.column, start.start, end?.end ?? start.end);
 
   const errorAt = (t: Token, message: string) => {
+    // One mistake often breaks several rules at the same token. Report it once.
+    const prev = errors[errors.length - 1];
+    if (prev && prev.start === t.start && prev.end === t.end) return;
     const err: CompilerError = {
       phase: "Syntax",
       message,
@@ -64,6 +121,39 @@ export function parse(
     };
     errors.push(err);
     log?.emit("parser", "error", message, tokenLoc(t));
+  };
+
+  // Recursion depth is limited so a hostile or accidental input cannot overflow the stack.
+  let depth = 0;
+  function nested<T>(run: () => T): T {
+    if (depth >= MAX_NESTING) {
+      throw new ParseLimit(
+        `Code is nested too deeply (more than ${MAX_NESTING} levels of brackets or blocks)`,
+        tokenLoc(peek()),
+      );
+    }
+    depth += 1;
+    try {
+      return run();
+    } finally {
+      depth -= 1;
+    }
+  }
+
+  // Operators chained in a loop (1 + 1 + 1 ...) build a deep tree without deep parser
+  // recursion, so their depth is tracked on the nodes themselves.
+  const depths = new WeakMap<object, number>();
+  const depthOf = (node: object) => depths.get(node) ?? 1;
+  const track = (node: Expr, children: Expr[]): Expr => {
+    const d = 1 + Math.max(...children.map(depthOf));
+    if (d > MAX_AST_DEPTH) {
+      throw new ParseLimit(
+        `Expression is nested too deeply (more than ${MAX_AST_DEPTH} operators or calls chained together)`,
+        node.loc,
+      );
+    }
+    depths.set(node, d);
+    return node;
   };
 
   const advance = (): Token => {
@@ -78,9 +168,13 @@ export function parse(
     return t;
   };
 
-  const expect = (type: string, message?: string): Token => {
+  /** Consume a token of this type, or report what was expected. `context` says where it belongs. */
+  const expect = (type: string, context?: string): Token => {
     if (at(type)) return advance();
-    errorAt(peek(), message ?? `Expected ${type}, found ${peek().type || "end of input"}`);
+    errorAt(
+      peek(),
+      `Expected ${nameOf(type)}${context ? ` ${context}` : ""}, found ${foundText(peek())}`,
+    );
     return peek();
   };
 
@@ -110,7 +204,7 @@ export function parse(
       else skipToStmt();
       if (pos === before) {
         if (at("EOF")) break;
-        errorAt(peek(), `Unexpected token '${peek().lexeme}' (${peek().type})`);
+        errorAt(peek(), unexpectedStatement(peek()));
         advance();
       }
     }
@@ -136,27 +230,35 @@ export function parse(
       if (peek(1).type === "ASSIGN") return parseAssignment();
       if (peek(1).type === "LBRACKET") return parseIndexAssignOrExpr();
       if (peek(1).type === "LPAREN") return parseExprStmt();
-      errorAt(peek(), `Unexpected identifier '${peek().lexeme}' — expected assignment or call`);
+      const name = peek().lexeme;
+      errorAt(
+        peek(),
+        `'${name}' is not a statement. Use '${name} = value' to assign, '${name}(...)' to call, or 'let ${name}: type = value' to declare`,
+      );
       advance();
       return null;
     }
     if (at("EOF") || at("RBRACE")) return null;
-    errorAt(
-      peek(),
-      peek().type === "EOF"
-        ? "Unexpected end of input; a statement or expression was incomplete."
-        : `Unexpected token '${peek().lexeme}' (${peek().type})`,
-    );
-    if (!at("EOF")) advance();
+    // A stray else/elif: skip its whole block so the block does not raise more errors.
+    if (at("ELSE", "ELIF")) {
+      const isElif = at("ELIF");
+      errorAt(peek(), unexpectedStatement(peek()));
+      advance();
+      if (isElif) parseExpression();
+      if (at("LBRACE")) parseBlock();
+      return null;
+    }
+    errorAt(peek(), unexpectedStatement(peek()));
+    advance();
     return null;
   }
 
   function parseDeclaration(): Stmt {
     const letTok = expect("LET");
-    const nameTok = expect("IDENTIFIER", "Expected identifier after let");
-    expect("COLON", "Expected ':' after identifier in declaration");
-    const typeTok = expect("TYPE", "Expected a type (int, float, bool, string, list)");
-    expect("ASSIGN", "Expected '=' in declaration");
+    const nameTok = expect("IDENTIFIER", "after 'let'");
+    expect("COLON", "after the variable name");
+    const typeTok = expect("TYPE", "after ':'");
+    expect("ASSIGN", "after the type");
     const value = parseExpression();
     const node: Stmt = {
       id: newAstId(),
@@ -226,9 +328,17 @@ export function parse(
 
   function parsePrint(): Stmt {
     const tok = expect("PRINT");
-    expect("LPAREN");
+    expect("LPAREN", "after 'print'");
     const expression = parseExpression();
-    expect("RPAREN");
+    if (at("COMMA")) {
+      errorAt(
+        peek(),
+        'print() takes exactly one value. Join several values with +, for example print("a" + b)',
+      );
+      // Skip the extra values, but stop at the end of this statement.
+      while (!at("RPAREN", "EOF", "RBRACE", "LET", "IF", "WHILE", "FOR", "FN", "RETURN", "PRINT")) advance();
+    }
+    expect("RPAREN", "to close 'print('");
     const node: Stmt = {
       id: newAstId(),
       kind: "print",
@@ -240,14 +350,18 @@ export function parse(
   }
 
   function parseBlock(): Stmt[] {
-    expect("LBRACE");
-    const body: Stmt[] = [];
-    while (!at("RBRACE") && !at("EOF")) {
-      const stmt = parseStatement();
-      if (stmt) body.push(stmt);
-      else skipToStmt();
-    }
-    expect("RBRACE", "Expected '}' to close block");
+    const opened = at("LBRACE");
+    const open = expect("LBRACE", "to start the block");
+    const body = nested(() => {
+      const stmts: Stmt[] = [];
+      while (!at("RBRACE") && !at("EOF")) {
+        const stmt = parseStatement();
+        if (stmt) stmts.push(stmt);
+        else skipToStmt();
+      }
+      return stmts;
+    });
+    expect("RBRACE", opened ? `to close the block opened at line ${open.line}` : "to close the block");
     return body;
   }
 
@@ -297,8 +411,8 @@ export function parse(
 
   function parseFor(): Stmt {
     const tok = expect("FOR");
-    const nameTok = expect("IDENTIFIER", "Expected loop variable after for");
-    expect("IN", "Expected 'in' in for-loop");
+    const nameTok = expect("IDENTIFIER", "after 'for'");
+    expect("IN", "after the loop variable");
     const iterable = parseExpression();
     const body = parseBlock();
     const node: Stmt = {
@@ -315,8 +429,8 @@ export function parse(
 
   function parseFn(): Stmt {
     const tok = expect("FN");
-    const nameTok = expect("IDENTIFIER", "Expected function name");
-    expect("LPAREN");
+    const nameTok = expect("IDENTIFIER", "after 'fn'");
+    expect("LPAREN", "after the function name");
     const params: Param[] = [];
     if (!at("RPAREN")) {
       params.push(parseParam());
@@ -325,11 +439,11 @@ export function parse(
         params.push(parseParam());
       }
     }
-    expect("RPAREN");
+    expect("RPAREN", "to close the parameter list");
     let returnType = "void";
     if (at("ARROW")) {
       advance();
-      const t = expect("TYPE", "Expected return type after '->'");
+      const t = expect("TYPE", "after '->'");
       returnType = String(t.lexeme);
     }
     const body = parseBlock();
@@ -347,9 +461,9 @@ export function parse(
   }
 
   function parseParam(): Param {
-    const nameTok = expect("IDENTIFIER", "Expected parameter name");
-    expect("COLON", "Expected ':' after parameter name");
-    const typeTok = expect("TYPE", "Expected parameter type");
+    const nameTok = expect("IDENTIFIER", "as a parameter name");
+    expect("COLON", "after the parameter name");
+    const typeTok = expect("TYPE", "as the parameter type");
     return {
       name: String(nameTok.lexeme),
       type: String(typeTok.lexeme),
@@ -388,7 +502,7 @@ export function parse(
   }
 
   function parseExpression(): Expr {
-    return parseOr();
+    return nested(parseOr);
   }
 
   function parseOr(): Expr {
@@ -414,7 +528,7 @@ export function parse(
   function parseNot(): Expr {
     if (at("NOT")) {
       const op = advance();
-      const operand = parseNot();
+      const operand = nested(parseNot);
       const node: Expr = {
         id: newAstId(),
         kind: "unary",
@@ -423,7 +537,7 @@ export function parse(
         loc: span(tokenLoc(op), operand.loc),
         eventId: 0,
       };
-      return mark(node, "unary → not unary") as Expr;
+      return mark(track(node, [operand]), "unary → not unary") as Expr;
     }
     return parseComparison();
   }
@@ -461,7 +575,7 @@ export function parse(
   function parseUnary(): Expr {
     if (at("MINUS")) {
       const op = advance();
-      const operand = parseUnary();
+      const operand = nested(parseUnary);
       const node: Expr = {
         id: newAstId(),
         kind: "unary",
@@ -470,7 +584,7 @@ export function parse(
         loc: span(tokenLoc(op), operand.loc),
         eventId: 0,
       };
-      return mark(node, "unary → - unary") as Expr;
+      return mark(track(node, [operand]), "unary → - unary") as Expr;
     }
     return parsePostfix();
   }
@@ -488,7 +602,7 @@ export function parse(
             args.push(parseExpression());
           }
         }
-        const end = expect("RPAREN");
+        const end = expect("RPAREN", "to close the call");
         const node: Expr = {
           id: newAstId(),
           kind: "call",
@@ -497,11 +611,11 @@ export function parse(
           loc: span(expr.loc, tokenLoc(end)),
           eventId: 0,
         };
-        expr = mark(node, "call → expr ( args )") as Expr;
+        expr = mark(track(node, [expr]), "call → expr ( args )") as Expr;
       } else if (at("LBRACKET")) {
         advance();
         const index = parseExpression();
-        const end = expect("RBRACKET");
+        const end = expect("RBRACKET", "to close the index");
         const node: Expr = {
           id: newAstId(),
           kind: "index",
@@ -510,7 +624,7 @@ export function parse(
           loc: span(expr.loc, tokenLoc(end)),
           eventId: 0,
         };
-        expr = mark(node, "index → expr [ expr ]") as Expr;
+        expr = mark(track(node, [expr]), "index → expr [ expr ]") as Expr;
       } else {
         break;
       }
@@ -581,7 +695,7 @@ export function parse(
     if (at("LPAREN")) {
       advance();
       const inner = parseExpression();
-      expect("RPAREN");
+      expect("RPAREN", "to close '('");
       return inner;
     }
     if (at("LBRACKET")) {
@@ -594,7 +708,7 @@ export function parse(
           elements.push(parseExpression());
         }
       }
-      const end = expect("RBRACKET");
+      const end = expect("RBRACKET", "to close the list");
       const node: Expr = {
         id: newAstId(),
         kind: "list",
@@ -605,12 +719,7 @@ export function parse(
       return mark(node, "primary → [ list ]") as Expr;
     }
 
-    errorAt(
-      peek(),
-      peek().type === "EOF"
-        ? "Unexpected end of input; a statement or expression was incomplete."
-        : `Unexpected token '${peek().lexeme}' (${peek().type})`,
-    );
+    errorAt(peek(), `Expected a value or expression, found ${foundText(peek())}`);
     const dummy: Expr = {
       id: newAstId(),
       kind: "literal",
@@ -633,10 +742,26 @@ export function parse(
       loc: span(left.loc, right.loc),
       eventId: 0,
     };
-    return mark(node, `expr → expr ${operator} expr`) as Expr;
+    return mark(track(node, [left, right]), `expr → expr ${operator} expr`) as Expr;
   }
 
-  const ast = parseProgram();
+  let ast: Program;
+  try {
+    ast = parseProgram();
+  } catch (e) {
+    if (!(e instanceof ParseLimit)) throw e;
+    // Too deep to process safely: report it and return no tree, so no later phase recurses over it.
+    errors.push({
+      phase: "Syntax",
+      message: e.message,
+      line: e.loc.line || 1,
+      column: e.loc.column || 1,
+      start: e.loc.start,
+      end: e.loc.end,
+    });
+    log?.emit("parser", "error", e.message, e.loc);
+    return { ast: null, errors };
+  }
   if (errors.length > 0 && ast.statements.length === 0) {
     return { ast: null, errors };
   }

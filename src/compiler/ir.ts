@@ -62,8 +62,11 @@ export function generateIR(program: Program, log?: EventLog): IrGenResult {
         const b = genExpr(expr.right);
         const t = newTemp();
         // int / int stays an int (semantic.ts types it as int), so it gets its own op.
-        const op = expr.operator === "/" && expr.resolvedType === "int" ? "//" : expr.operator;
-        emit(t, op, a, b, expr.loc.line);
+        const isInt = expr.resolvedType === "int";
+        const op = expr.operator === "/" && isInt ? "//" : expr.operator;
+        // The "int" marker tells the executor to reject a result that is no longer exact.
+        const exact = isInt && (op === "+" || op === "-" || op === "*");
+        emit(t, op, a, b, expr.loc.line, exact ? ["int"] : undefined);
         return t;
       }
       case "call": {
@@ -103,12 +106,13 @@ export function generateIR(program: Program, log?: EventLog): IrGenResult {
     switch (stmt.kind) {
       case "declaration": {
         const v = genExpr(stmt.value);
-        emit(stmt.name, "=", v, null, stmt.loc.line, ["decl"]);
+        emit(stmt.name, "=", v, null, stmt.loc.line);
         break;
       }
       case "assignment": {
         const v = genExpr(stmt.value);
-        emit(stmt.name, "=", v, null, stmt.loc.line);
+        // "assign" lets the executor store into the global when the name is not local.
+        emit(stmt.name, "=", v, null, stmt.loc.line, ["assign"]);
         break;
       }
       case "index-assign": {
@@ -160,7 +164,7 @@ export function generateIR(program: Program, log?: EventLog): IrGenResult {
           const n = genExpr(stmt.iterable);
           const start = newLabel();
           const end = newLabel();
-          emit(stmt.iterator, "=", "0", null, stmt.loc.line, ["decl"]);
+          emit(stmt.iterator, "=", "0", null, stmt.loc.line);
           emit(start, "label", null, null, stmt.loc.line);
           const cmp = newTemp();
           emit(cmp, "<", stmt.iterator, n, stmt.loc.line);
@@ -183,7 +187,7 @@ export function generateIR(program: Program, log?: EventLog): IrGenResult {
           const cmp = newTemp();
           emit(cmp, "<", idx, len, stmt.loc.line);
           emit(null, "ifFalse", cmp, end, stmt.loc.line);
-          emit(stmt.iterator, "index", iter, idx, stmt.loc.line, ["decl"]);
+          emit(stmt.iterator, "index", iter, idx, stmt.loc.line);
           genBlock(stmt.body);
           const nxt = newTemp();
           emit(nxt, "+", idx, "1", stmt.loc.line);

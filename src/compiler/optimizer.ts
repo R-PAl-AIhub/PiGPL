@@ -5,15 +5,22 @@ import type { OptimizationStep, Quad } from "./types.ts";
 const BINOPS = new Set(["+", "-", "*", "/", "//", "%","==", "!=", "<", ">", "<=", ">=", "and", "or"]);
 
 function isTemp(name: string | null): name is string {
-  return !!name && /^t\d+$/.test(name);
+  // A temp is "t" plus digits. The first-character test skips the regex for every other name.
+  return !!name && name.charCodeAt(0) === 116 && /^t\d+$/.test(name);
 }
 
+const NOT_CONST = { ok: false } as const;
+
 function parseConst(raw: string | null): { ok: true; value: number | string | boolean } | { ok: false } {
-  if (raw === null) return { ok: false };
+  if (raw === null || raw.length === 0) return NOT_CONST;
+  // Names start with a letter or underscore, so only these characters can begin a constant.
+  const c = raw.charCodeAt(0);
+  const numeric = c === 45 || (c >= 48 && c <= 57);
+  if (!numeric && c !== 34 && c !== 116 && c !== 102) return NOT_CONST;
   if (raw === "true") return { ok: true, value: true };
   if (raw === "false") return { ok: true, value: false };
-  if (/^-?\d+$/.test(raw)) return { ok: true, value: Number(raw) };
-  if (/^-?\d+\.\d+$/.test(raw)) return { ok: true, value: Number(raw) };
+  if (numeric && /^-?\d+$/.test(raw)) return { ok: true, value: Number(raw) };
+  if (numeric && /^-?\d+\.\d+$/.test(raw)) return { ok: true, value: Number(raw) };
   if (raw.startsWith('"') && raw.endsWith('"')) {
     try {
       return { ok: true, value: JSON.parse(raw) as string };
@@ -30,6 +37,15 @@ function constText(v: number | string | boolean): string {
   return String(v);
 }
 
+/**
+ * Whole numbers that grow past the exact range are not folded. They stay in the code,
+ * so the executor can report the overflow instead of the compiler hiding it.
+ */
+const unlessOverflow = (a: number, b: number, result: number) =>
+  Number.isSafeInteger(a) && Number.isSafeInteger(b) && !Number.isSafeInteger(result)
+    ? undefined
+    : result;
+
 function evalBin(
   op: string,
   a: number | string | boolean,
@@ -37,14 +53,14 @@ function evalBin(
 ): number | string | boolean | undefined {
   switch (op) {
     case "+":
-      if (typeof a === "number" && typeof b === "number") return a + b;
+      if (typeof a === "number" && typeof b === "number") return unlessOverflow(a, b, a + b);
       if (typeof a === "string" && typeof b === "string") return a + b;
       return undefined;
     case "-":
-      if (typeof a === "number" && typeof b === "number") return a - b;
+      if (typeof a === "number" && typeof b === "number") return unlessOverflow(a, b, a - b);
       return undefined;
     case "*":
-      if (typeof a === "number" && typeof b === "number") return a * b;
+      if (typeof a === "number" && typeof b === "number") return unlessOverflow(a, b, a * b);
       return undefined;
     case "/":
       if (typeof a === "number" && typeof b === "number" && b !== 0) return a / b;

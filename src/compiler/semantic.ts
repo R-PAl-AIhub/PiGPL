@@ -5,16 +5,78 @@ import type { CompilerError, SemanticCheck } from "./types.ts";
 
 const NUMERIC = new Set(["int", "float"]);
 const COMPARISON = new Set(["==", "!=", "<", ">", "<=", ">="]);
+const ORDERED = new Set(["<", ">", "<=", ">="]);
 const ARITH = new Set(["+", "-", "*", "/", "%"]);
+
+/**
+ * The type of a value the compiler cannot see, such as an item of a plain `list`.
+ * It matches every type here, and the executor checks the real types when the program runs.
+ */
+const UNKNOWN = "unknown";
+
+const numericOrUnknown = (t: string) => NUMERIC.has(t) || t === UNKNOWN;
 
 function listElemType(t: string | undefined): string | undefined {
   if (!t) return undefined;
   const m = /^list\[(.+)\]$/.exec(t);
-  return m ? m[1] : t === "list" ? "unknown" : undefined;
+  return m ? m[1] : t === "list" ? UNKNOWN : undefined;
 }
 
 function asListType(elem: string) {
-  return elem === "unknown" ? "list" : `list[${elem}]`;
+  return elem === UNKNOWN ? "list" : `list[${elem}]`;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** Edit distance between two names, giving up (and returning max + 1) once it passes `max`. */
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min(prev[j]! + 1, row[j - 1]! + 1, prev[j - 1]! + cost);
+      best = Math.min(best, row[j]!);
+    }
+    if (best > max) return max + 1;
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
+/** The declared name that is closest to a misspelled one, if any is close enough to be a likely typo. */
+function closestName(name: string, candidates: string[]): string | undefined {
+  if (name.length < 3) return undefined;
+  const max = name.length >= 4 ? 2 : 1;
+  let best: string | undefined;
+  let bestDistance = max + 1;
+  for (const candidate of candidates) {
+    if (candidate === name) continue;
+    const d = editDistance(name, candidate, max);
+    if (d < bestDistance) {
+      best = candidate;
+      bestDistance = d;
+    }
+  }
+  return best;
+}
+
+/** True when every path through these statements ends in a `return`. A loop never counts. */
+function alwaysReturns(stmts: Stmt[]): boolean {
+  return stmts.some((s) => {
+    if (s.kind === "return") return true;
+    if (s.kind === "if") {
+      return (
+        s.elseBlock !== null &&
+        alwaysReturns(s.thenBlock) &&
+        s.elifs.every((e) => alwaysReturns(e.block)) &&
+        alwaysReturns(s.elseBlock)
+      );
+    }
+    return false;
+  });
 }
 
 export function analyze(
@@ -24,13 +86,13 @@ export function analyze(
   const symbols = new SymbolTable();
   const checks: SemanticCheck[] = [];
   const errors: CompilerError[] = [];
-  const fnReturnStack: string[] = [];
-
-  const locOfNode = (node: { loc: { line: number; column: number; start: number; end: number } }) =>
-    node.loc;
+  const fnStack: { name: string; returnType: string }[] = [];
+  /** How many if/while/for/fn bodies enclose the statement being visited. */
+  let nesting = 0;
+  const duplicateFns = new Set<FnStmt>();
 
   function emitCheck(ok: boolean, message: string, line = 0, column = 0) {
-    const event = log?.emit(ok ? "semantic" : "semantic", ok ? "check" : "fail", message, {
+    const event = log?.emit("semantic", ok ? "check" : "fail", message, {
       line,
       column,
       start: 0,
@@ -39,7 +101,10 @@ export function analyze(
     checks.push({ ok, message, eventId: event?.id ?? checks.length + 1, line, column });
   }
 
-  function error(message: string, node: { loc: { line: number; column: number; start?: number; end?: number } }) {
+  function error(
+    message: string,
+    node: { loc: { line: number; column: number; start?: number; end?: number } },
+  ) {
     const err: CompilerError = {
       phase: "Semantic",
       message,
@@ -49,20 +114,44 @@ export function analyze(
       end: node.loc.end,
     };
     errors.push(err);
-    log?.emit("semantic", "error", message, locOfNode(node as { loc: { line: number; column: number; start: number; end: number } }));
+    log?.emit("semantic", "error", message, {
+      line: node.loc.line,
+      column: node.loc.column,
+      start: node.loc.start ?? 0,
+      end: node.loc.end ?? 0,
+    });
     emitCheck(false, message, node.loc.line, node.loc.column);
   }
 
+  /** Same type, or types that can be compared or mixed (an int and a float, or an unknown). */
   function compatible(declared: string, actual: string) {
     if (declared === actual) return true;
-    if (declared === "unknown" || actual === "unknown") return true;
+    if (declared === UNKNOWN || actual === UNKNOWN) return true;
     if (NUMERIC.has(declared) && NUMERIC.has(actual)) return true;
     if (declared === "list" && actual.startsWith("list")) return true;
     if (actual === "list" && declared.startsWith("list")) return true;
     const de = listElemType(declared);
     const ae = listElemType(actual);
-    if (de && ae && (de === ae || de === "unknown" || ae === "unknown")) return true;
+    if (de && ae && (de === ae || de === UNKNOWN || ae === UNKNOWN)) return true;
     return false;
+  }
+
+  /** Can a value of type `actual` be stored where `declared` is expected? An int fits a float, but a float does not fit an int. */
+  function assignable(declared: string, actual: string) {
+    if (declared === "int" && actual === "float") return false;
+    return compatible(declared, actual);
+  }
+
+  const mismatchNote = (expected: string, found: string) =>
+    expected === "int" && found === "float"
+      ? " (an int cannot hold a decimal value; declare it as float)"
+      : "";
+
+  function undeclared(name: string): string {
+    const guess = closestName(name, symbols.visibleNames());
+    return guess
+      ? `Undeclared identifier: ${name} (did you mean '${guess}'?)`
+      : `Undeclared identifier: ${name}`;
   }
 
   function visitStmt(stmt: Stmt) {
@@ -76,10 +165,15 @@ export function analyze(
       case "index-assign":
         visitIndexAssign(stmt);
         break;
-      case "print":
-        visitExpr(stmt.expression);
-        emitCheck(true, "print() argument is a valid expression", stmt.loc.line, stmt.loc.column);
+      case "print": {
+        const t = visitExpr(stmt.expression);
+        if (t === "void") {
+          error("print() needs a value, but this function call returns nothing", stmt);
+        } else {
+          emitCheck(true, "print() argument is a valid expression", stmt.loc.line, stmt.loc.column);
+        }
         break;
+      }
       case "if":
         visitIf(stmt);
         break;
@@ -101,6 +195,13 @@ export function analyze(
     }
   }
 
+  /** Visit the statements of a body that sits one level deeper. */
+  function visitBody(stmts: Stmt[]) {
+    nesting += 1;
+    for (const s of stmts) visitStmt(s);
+    nesting -= 1;
+  }
+
   function visitDeclaration(stmt: Extract<Stmt, { kind: "declaration" }>) {
     if (symbols.lookupInCurrent(stmt.name)) {
       error(`Identifier '${stmt.name}' is already declared`, stmt);
@@ -108,9 +209,9 @@ export function analyze(
     }
     const valueType = visitExpr(stmt.value);
     emitCheck(true, `Declaration valid: let ${stmt.name} : ${stmt.varType}`, stmt.loc.line, stmt.loc.column);
-    if (valueType && !compatible(stmt.varType, valueType)) {
+    if (valueType && !assignable(stmt.varType, valueType)) {
       error(
-        `Type mismatch in declaration of '${stmt.name}': expected ${stmt.varType}, found ${valueType}`,
+        `Type mismatch in declaration of '${stmt.name}': expected ${stmt.varType}, found ${valueType}${mismatchNote(stmt.varType, valueType)}`,
         stmt,
       );
       emitCheck(false, `Type valid for '${stmt.name}' (${stmt.varType} = ${valueType})`, stmt.loc.line, stmt.loc.column);
@@ -135,7 +236,7 @@ export function analyze(
   function visitAssignment(stmt: Extract<Stmt, { kind: "assignment" }>) {
     const entry = symbols.lookup(stmt.name);
     if (!entry) {
-      error(`Undeclared identifier: ${stmt.name}`, stmt);
+      error(undeclared(stmt.name), stmt);
       visitExpr(stmt.value);
       return;
     }
@@ -145,9 +246,9 @@ export function analyze(
     }
     emitCheck(true, `Identifier declared: '${stmt.name}'`, stmt.loc.line, stmt.loc.column);
     const valueType = visitExpr(stmt.value);
-    if (valueType && !compatible(entry.varType, valueType)) {
+    if (valueType && !assignable(entry.varType, valueType)) {
       error(
-        `Type mismatch in assignment to '${stmt.name}': expected ${entry.varType}, found ${valueType}`,
+        `Type mismatch in assignment to '${stmt.name}': expected ${entry.varType}, found ${valueType}${mismatchNote(entry.varType, valueType)}`,
         stmt,
       );
     } else {
@@ -160,47 +261,55 @@ export function analyze(
     const targetType = visitExpr(stmt.target);
     const indexType = visitExpr(stmt.index);
     const valueType = visitExpr(stmt.value);
-    if (indexType && indexType !== "int") {
+    if (indexType && indexType !== "int" && indexType !== UNKNOWN) {
       error(`List index must be int, found ${indexType}`, stmt);
     }
-    const elem = listElemType(targetType ?? "") ?? (targetType === "list" ? "unknown" : undefined);
+    // The target already failed and was reported; do not add a second error about it.
+    if (!targetType) return;
+    // m[0][1] = 5 would change a temporary copy of m[0] and lose the change, so refuse it.
+    if (stmt.target.kind !== "identifier") {
+      error(
+        "Only a list variable can be changed by index, as in xs[0] = 1. Changing an item inside a nested list, as in m[0][1] = 1, is not supported",
+        stmt,
+      );
+      return;
+    }
+    const elem = targetType === UNKNOWN ? UNKNOWN : listElemType(targetType);
     if (!elem) {
       error("Indexed assignment requires a list", stmt);
       return;
     }
-    if (valueType && elem !== "unknown" && !compatible(elem, valueType)) {
+    if (valueType && elem !== UNKNOWN && !assignable(elem, valueType)) {
       error(`Type mismatch in list assignment: expected ${elem}, found ${valueType}`, stmt);
     }
   }
 
   function visitIf(stmt: Extract<Stmt, { kind: "if" }>) {
-    const cond = visitExpr(stmt.condition);
-    checkCondition(cond, stmt);
-    for (const s of stmt.thenBlock) visitStmt(s);
+    checkCondition(visitExpr(stmt.condition), stmt.condition);
+    visitBody(stmt.thenBlock);
     for (const el of stmt.elifs) {
-      const c = visitExpr(el.condition);
-      checkCondition(c, stmt);
-      for (const s of el.block) visitStmt(s);
+      checkCondition(visitExpr(el.condition), el.condition);
+      visitBody(el.block);
     }
-    if (stmt.elseBlock) for (const s of stmt.elseBlock) visitStmt(s);
+    if (stmt.elseBlock) visitBody(stmt.elseBlock);
   }
 
   function visitWhile(stmt: Extract<Stmt, { kind: "while" }>) {
-    const cond = visitExpr(stmt.condition);
-    checkCondition(cond, stmt);
-    for (const s of stmt.body) visitStmt(s);
+    checkCondition(visitExpr(stmt.condition), stmt.condition);
+    visitBody(stmt.body);
   }
 
   function visitFor(stmt: Extract<Stmt, { kind: "for" }>) {
     const iterType = visitExpr(stmt.iterable);
     let elemType = "int";
     if (iterType === "int") elemType = "int";
+    else if (iterType === UNKNOWN) elemType = UNKNOWN;
     else if (iterType && (iterType === "list" || iterType.startsWith("list"))) {
-      elemType = listElemType(iterType) ?? "unknown";
+      elemType = listElemType(iterType) ?? UNKNOWN;
     } else if (iterType === "string") {
       elemType = "string";
     } else if (iterType) {
-      error(`Cannot iterate over type ${iterType}`, stmt);
+      error(`Cannot iterate over type ${iterType} (use a whole number, a list or a string)`, stmt);
     }
     log?.emit("semantic", "scope", `enter loop ${stmt.iterator}`, stmt.loc);
     symbols.enterScope(`for:${stmt.iterator}:${stmt.id}`);
@@ -215,14 +324,17 @@ export function analyze(
       column: stmt.loc.column,
     });
     emitCheck(true, `Loop variable '${stmt.iterator}' : ${elemType}`, stmt.loc.line, stmt.loc.column);
-    for (const s of stmt.body) visitStmt(s);
+    visitBody(stmt.body);
     symbols.exitScope();
     log?.emit("semantic", "scope", `exit loop ${stmt.iterator}`, stmt.loc);
   }
 
-  function visitFn(stmt: FnStmt) {
+  /** Put a top-level function in the symbol table. Done before any body is visited. */
+  function declareFn(stmt: FnStmt) {
     if (symbols.lookupInCurrent(stmt.name)) {
       error(`Identifier '${stmt.name}' is already declared`, stmt);
+      duplicateFns.add(stmt);
+      return;
     }
     const sig = `fn(${stmt.params.map((p) => p.type).join(",")})->${stmt.returnType}`;
     const event = log?.emit("symbols", "declare", `declare ${stmt.name}: ${sig}`, stmt.loc);
@@ -236,6 +348,21 @@ export function analyze(
       column: stmt.loc.column,
     });
     emitCheck(true, `Function '${stmt.name}' declared`, stmt.loc.line, stmt.loc.column);
+  }
+
+  function visitFn(stmt: FnStmt) {
+    // The IR and the executor place functions before the main program, so a function
+    // cannot be defined inside another function, a loop or an if.
+    if (nesting > 0) {
+      error(
+        "Functions can only be defined at the top level of the program, not inside another function, loop or if",
+        stmt,
+      );
+      // Still record the name, so a later call to it does not raise a second, misleading error.
+      declareFn(stmt);
+      return;
+    }
+    if (duplicateFns.has(stmt)) return;
     symbols.enterScope(`fn:${stmt.name}`);
     log?.emit("semantic", "scope", `enter ${stmt.name}`, stmt.loc);
     for (const p of stmt.params) {
@@ -254,37 +381,47 @@ export function analyze(
         column: p.loc.column,
       });
     }
-    fnReturnStack.push(stmt.returnType);
-    for (const s of stmt.body) visitStmt(s);
-    fnReturnStack.pop();
+    fnStack.push({ name: stmt.name, returnType: stmt.returnType });
+    visitBody(stmt.body);
+    fnStack.pop();
+    if (stmt.returnType !== "void" && !alwaysReturns(stmt.body)) {
+      error(
+        `Function '${stmt.name}' must return a value of type ${stmt.returnType} on every path (add a 'return' at the end)`,
+        stmt,
+      );
+    }
     symbols.exitScope();
     log?.emit("semantic", "scope", `exit ${stmt.name}`, stmt.loc);
   }
 
   function visitReturn(stmt: Extract<Stmt, { kind: "return" }>) {
-    const expected = fnReturnStack[fnReturnStack.length - 1];
-    if (expected === undefined) {
+    const fn = fnStack[fnStack.length - 1];
+    if (fn === undefined) {
       error("return outside of a function", stmt);
       return;
     }
+    const expected = fn.returnType;
     if (stmt.value) {
       const t = visitExpr(stmt.value);
       if (expected === "void") {
-        error("Function with no return type cannot return a value", stmt);
-      } else if (t && !compatible(expected, t)) {
-        error(`Return type mismatch: expected ${expected}, found ${t}`, stmt);
+        error(
+          `Function '${fn.name}' has no return type and cannot return a value (add '-> type' after the parameters)`,
+          stmt,
+        );
+      } else if (t && !assignable(expected, t)) {
+        error(`Return type mismatch: expected ${expected}, found ${t}${mismatchNote(expected, t)}`, stmt);
       } else {
         emitCheck(true, `Return type ${t} matches ${expected}`, stmt.loc.line, stmt.loc.column);
       }
     } else if (expected !== "void") {
-      error(`Function must return ${expected}`, stmt);
+      error(`Function '${fn.name}' must return a value of type ${expected}, but this return has no value`, stmt);
     }
   }
 
   function checkCondition(cond: string | undefined, node: { loc: { line: number; column: number } }) {
-    if (!cond) return;
+    if (!cond || cond === UNKNOWN) return;
     if (cond !== "bool") {
-      error(`Condition must be bool, found ${cond}`, node);
+      error(`Condition must be bool, found ${cond} (use a comparison such as x > 0)`, node);
     } else {
       emitCheck(true, "Condition is a valid boolean expression", node.loc.line, node.loc.column);
     }
@@ -302,7 +439,7 @@ export function analyze(
         }
         const entry = symbols.lookup(node.name);
         if (!entry) {
-          error(`Undeclared identifier: ${node.name}`, node);
+          error(undeclared(node.name), node);
           return undefined;
         }
         emitCheck(true, `Identifier declared: '${node.name}'`, node.loc.line, node.loc.column);
@@ -314,7 +451,7 @@ export function analyze(
         const t = visitExpr(node.operand);
         if (!t) return undefined;
         if (node.operator === "-") {
-          if (!NUMERIC.has(t)) {
+          if (!numericOrUnknown(t)) {
             error(`Unary '-' requires a numeric operand, found ${t}`, node);
             return undefined;
           }
@@ -322,7 +459,7 @@ export function analyze(
           return t;
         }
         if (node.operator === "not") {
-          if (t !== "bool") {
+          if (t !== "bool" && t !== UNKNOWN) {
             error(`Unary 'not' requires a bool operand, found ${t}`, node);
             return undefined;
           }
@@ -338,9 +475,9 @@ export function analyze(
       case "list": {
         const types = node.elements.map((e) => visitExpr(e));
         const known = types.filter((t): t is string => !!t);
-        const first = known[0] ?? "unknown";
+        const first = known[0] ?? UNKNOWN;
         const homog = known.every((t) => compatible(first, t));
-        const t = asListType(homog ? first : "unknown");
+        const t = asListType(homog ? first : UNKNOWN);
         node.resolvedType = t;
         emitCheck(true, `List literal ${t}`, node.loc.line, node.loc.column);
         return t;
@@ -348,7 +485,11 @@ export function analyze(
       case "index": {
         const tt = visitExpr(node.target);
         const it = visitExpr(node.index);
-        if (it && it !== "int") error(`List index must be int, found ${it}`, node);
+        if (it && it !== "int" && it !== UNKNOWN) error(`List index must be int, found ${it}`, node);
+        if (tt === UNKNOWN) {
+          node.resolvedType = UNKNOWN;
+          return UNKNOWN;
+        }
         const elem = listElemType(tt ?? "");
         if (!elem && tt !== "string") {
           if (tt) error(`Cannot index type ${tt}`, node);
@@ -368,7 +509,8 @@ export function analyze(
     const op = node.operator;
 
     if (op === "and" || op === "or") {
-      if (lt !== "bool" || rt !== "bool") {
+      const notBool = (t: string) => t !== "bool" && t !== UNKNOWN;
+      if (notBool(lt) || notBool(rt)) {
         error(`Operator '${op}' requires bool operands, found ${lt} and ${rt}`, node);
         return undefined;
       }
@@ -382,7 +524,7 @@ export function analyze(
         error(`Type mismatch in comparison: ${lt} ${op} ${rt}`, node);
         return undefined;
       }
-      if ((op === "<" || op === ">" || op === "<=" || op === ">=") && !(NUMERIC.has(lt) && NUMERIC.has(rt))) {
+      if (ORDERED.has(op) && !(numericOrUnknown(lt) && numericOrUnknown(rt))) {
         error(`Ordered comparison requires numeric operands, found ${lt} and ${rt}`, node);
         return undefined;
       }
@@ -392,6 +534,23 @@ export function analyze(
     }
 
     if (ARITH.has(op)) {
+      if (lt === UNKNOWN || rt === UNKNOWN) {
+        // One side is a value whose type is only known when the program runs, such as a list item.
+        const other = lt === UNKNOWN ? rt : lt;
+        const fits = other === UNKNOWN || NUMERIC.has(other) || (op === "+" && other === "string");
+        if (!fits) {
+          error(`Operator '${op}' requires numeric operands, found ${lt} and ${rt}`, node);
+          return undefined;
+        }
+        emitCheck(
+          true,
+          `Operator '${op}' has an operand of unknown type; it is checked when the program runs`,
+          node.loc.line,
+          node.loc.column,
+        );
+        node.resolvedType = UNKNOWN;
+        return UNKNOWN;
+      }
       if (op === "+" && lt === "string" && rt === "string") {
         emitCheck(true, "String concatenation types valid", node.loc.line, node.loc.column);
         node.resolvedType = "string";
@@ -430,15 +589,16 @@ export function analyze(
       return undefined;
     }
     if (parsed.params.length !== argTypes.length) {
+      const who = node.callee.kind === "identifier" ? `Function '${node.callee.name}'` : "Function";
       error(
-        `Function expected ${parsed.params.length} argument(s), got ${argTypes.length}`,
+        `${who} expects ${plural(parsed.params.length, "argument")} but got ${argTypes.length}`,
         node,
       );
     } else {
       parsed.params.forEach((p, i) => {
         const a = argTypes[i];
-        if (a && !compatible(p, a)) {
-          error(`Argument ${i + 1}: expected ${p}, found ${a}`, node);
+        if (a && !assignable(p, a)) {
+          error(`Argument ${i + 1}: expected ${p}, found ${a}${mismatchNote(p, a)}`, node);
         }
       });
       emitCheck(true, "Call argument types valid", node.loc.line, node.loc.column);
@@ -447,6 +607,9 @@ export function analyze(
     return parsed.ret;
   }
 
+  // Declare every top-level function first, so a call can come before the definition
+  // and two functions can call each other.
+  for (const stmt of program.statements) if (stmt.kind === "fn") declareFn(stmt);
   for (const stmt of program.statements) visitStmt(stmt);
   return { symbols, checks, errors };
 }

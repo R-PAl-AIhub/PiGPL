@@ -349,10 +349,26 @@ function ExecuteView({ result, maxEventId }: { result: CompileResult; maxEventId
   );
 }
 
+/** The source line an error points at, with a caret under the column. */
+function SourceSnippet({ lines, line, column }: { lines: string[]; line: number; column: number }) {
+  const raw = line >= 1 ? lines[line - 1] : undefined;
+  if (raw === undefined) return null;
+  // A tab counts as one column in the lexer, so show it as one space to keep the caret aligned.
+  const text = raw.replace(/\r$/, "").replace(/\t/g, " ");
+  const shown = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  const caret = column >= 1 && column <= shown.length + 1 ? `\n     | ${" ".repeat(column - 1)}^` : "";
+  return (
+    <pre className="mt-2 overflow-auto rounded-sm bg-elevated px-3 py-2 font-mono text-xs leading-relaxed text-muted">
+      {`${String(line).padStart(4, " ")} | ${shown}${caret}`}
+    </pre>
+  );
+}
+
 function ErrorsView({ result }: { result: CompileResult }) {
   if (result.errors.length === 0) {
     return <p className="text-sm text-ok">No diagnostics. This program is valid PiGPL.</p>;
   }
+  const lines = result.source.split("\n");
   return (
     <ul className="flex flex-col gap-3">
       {result.errors.map((e, i) => (
@@ -362,6 +378,7 @@ function ErrorsView({ result }: { result: CompileResult }) {
           <p className="mt-1 font-mono text-xs text-muted">
             Line {e.line || "?"} · column {e.column || "?"}
           </p>
+          <SourceSnippet lines={lines} line={e.line} column={e.column} />
         </li>
       ))}
     </ul>

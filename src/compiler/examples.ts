@@ -154,6 +154,16 @@ let x: int = y + 10
 print(x)
 `,
   },
+  {
+    id: "runtime",
+    name: "Runtime error",
+    blurb: "A list index past the end of the list",
+    source: `# Demonstrates a runtime error: the list has 3 items, so valid indexes are 0 to 2
+let xs: list = [10, 20, 30]
+print(xs[2])
+print(xs[3])
+`,
+  },
 ];
 
 export const GRAMMAR = `program      ::= statement*

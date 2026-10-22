@@ -53,16 +53,43 @@ const ONE_CHAR: Record<string, string> = {
   ":": "COLON",
 };
 
+// Character classes use char codes: this runs once per source character, and a
+// regex test per character was the slowest part of the lexer.
 function isIdentStart(ch: string) {
-  return /[A-Za-z_]/.test(ch);
+  const c = ch.charCodeAt(0);
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
 }
 
 function isIdentPart(ch: string) {
-  return /[A-Za-z0-9_]/.test(ch);
+  return isIdentStart(ch) || isDigit(ch);
 }
 
 function isDigit(ch: string) {
   return ch >= "0" && ch <= "9";
+}
+
+/** Why a character is invalid, for the characters people most often type by mistake. */
+const CHAR_HINTS: Record<string, string> = {
+  ".": "a decimal number needs digits on both sides of the point, for example 0.5",
+  "'": 'strings use double quotes, for example "text"',
+  "!": "use 'not' to negate a condition, or '!=' to compare two values",
+  "&": "use 'and' to combine conditions",
+  "|": "use 'or' to combine conditions",
+  ";": "end a statement with a new line; PiGPL does not use a semicolon",
+  "“": 'this is a curly quote; use straight double quotes " instead',
+  "”": 'this is a curly quote; use straight double quotes " instead',
+  "‘": 'this is a curly quote; strings use straight double quotes "',
+  "’": 'this is a curly quote; strings use straight double quotes "',
+  " ": "a non-breaking space; replace it with a normal space",
+  "　": "a wide space; replace it with a normal space",
+  "﻿": "an invisible byte-order mark; delete it",
+};
+
+/** The text that names a character in an error: the character itself when it is visible. */
+function describeChar(ch: string): string {
+  const cp = ch.codePointAt(0)!;
+  const invisible = cp < 32 || cp === 127 || /\s/.test(ch);
+  return invisible ? `U+${cp.toString(16).toUpperCase().padStart(4, "0")}` : `'${ch}'`;
 }
 
 export function tokenize(
@@ -113,6 +140,20 @@ export function tokenize(
     });
   };
 
+  const lexError = (
+    message: string,
+    tokLine: number,
+    tokCol: number,
+    start: number,
+    end: number,
+    payload?: Record<string, unknown>,
+  ) => {
+    errors.push({ phase: "Lexical", message, line: tokLine, column: tokCol, start, end });
+    log?.emit("lexer", "error", message, locOf(tokLine, tokCol, start, end), payload);
+  };
+
+  const shorten = (text: string) => (text.length > 24 ? `${text.slice(0, 20)}...` : text);
+
   while (i < source.length) {
     const ch = source[i]!;
 
@@ -136,10 +177,25 @@ export function tokenize(
         advance();
         while (i < source.length && isDigit(source[i]!)) advance();
         const lexeme = source.slice(start, i);
-        emitToken("FLOATNUM", lexeme, Number(lexeme), start, i, tokLine, tokCol);
+        const value = Number(lexeme);
+        emitToken("FLOATNUM", lexeme, value, start, i, tokLine, tokCol);
+        if (!Number.isFinite(value)) {
+          lexError(`Number literal ${shorten(lexeme)} is too large to store`, tokLine, tokCol, start, i);
+        }
       } else {
         const lexeme = source.slice(start, i);
-        emitToken("INTEGER", lexeme, Number(lexeme), start, i, tokLine, tokCol);
+        const value = Number(lexeme);
+        emitToken("INTEGER", lexeme, value, start, i, tokLine, tokCol);
+        // Past this size an int is no longer exact, so a wrong number would print silently.
+        if (!Number.isSafeInteger(value)) {
+          lexError(
+            `Integer literal ${shorten(lexeme)} is too large (the largest int is ${Number.MAX_SAFE_INTEGER})`,
+            tokLine,
+            tokCol,
+            start,
+            i,
+          );
+        }
       }
       continue;
     }
@@ -172,16 +228,13 @@ export function tokenize(
       }
       const lexeme = source.slice(start, i);
       if (!closed) {
-        const err: CompilerError = {
-          phase: "Lexical",
-          message: "Unterminated string literal",
-          line: tokLine,
-          column: tokCol,
+        lexError(
+          'Unterminated string literal (add a closing " before the end of the line)',
+          tokLine,
+          tokCol,
           start,
-          end: i,
-        };
-        errors.push(err);
-        log?.emit("lexer", "error", err.message, locOf(tokLine, tokCol, start, i));
+          i,
+        );
       } else {
         emitToken("STRING", lexeme, value, start, i, tokLine, tokCol);
       }
@@ -213,19 +266,18 @@ export function tokenize(
       continue;
     }
 
-    const err: CompilerError = {
-      phase: "Lexical",
-      message: `Invalid character '${ch}'`,
-      line: tokLine,
-      column: tokCol,
+    // Take the whole code point: an emoji is two UTF-16 units and must be one error.
+    const bad = String.fromCodePoint(source.codePointAt(i)!);
+    const hint = CHAR_HINTS[bad];
+    lexError(
+      `Invalid character ${describeChar(bad)}${hint ? ` (${hint})` : ""}`,
+      tokLine,
+      tokCol,
       start,
-      end: start + 1,
-    };
-    errors.push(err);
-    log?.emit("lexer", "error", err.message, locOf(tokLine, tokCol, start, start + 1), {
-      char: ch,
-    });
-    advance();
+      start + bad.length,
+      { char: bad },
+    );
+    for (let k = 0; k < bad.length; k++) advance();
   }
 
   return { tokens, errors };

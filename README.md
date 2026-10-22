@@ -22,6 +22,7 @@ A compiler is a program that reads code and changes it into a form that a comput
 12. [Project files](#project-files)
 13. [Commands](#commands)
 14. [Words used in this guide](#words-used-in-this-guide)
+15. [Project documentation: change report](#project-documentation-change-report)
 
 ## What you need
 
@@ -181,6 +182,8 @@ The semantic stage checks that your program makes sense. Here are some of the th
 - Each value has the correct type.
 - Each `if` and `while` condition is `true` or `false`.
 - Each function call has the correct number of inputs.
+- Each function that gives a result returns a value on every path.
+- Each function is at the top level of the program.
 
 Each check shows a green tick (✓) when it passes, or a red cross (✗) when it fails. If a check fails, the program does not run.
 
@@ -238,7 +241,7 @@ The app runs the optimized TAC. This tab shows the output of the program, line b
 
 ### Errors
 
-This tab lists each error. Each error shows the stage, the message, the line number and the column number.
+This tab lists each error. Each error shows the stage, the message, the line number and the column number. It also shows the line of your program, with a `^` mark under the place of the error.
 
 ### Grammar
 
@@ -292,6 +295,10 @@ This program prints `Greater`.
 | `list` | A group of values in square brackets | `[10, 20, 30]` |
 
 For a `float`, write at least one digit on each side of the point. Write `0.5`, not `.5`.
+
+A `float` variable can hold an `int`. An `int` variable cannot hold a decimal value. For example, `let x: int = 1.5` gives an error. Declare `x` as a `float` instead.
+
+The largest `int` is 9007199254740991. The smallest `int` is -9007199254740991. A whole number outside this range gives an error, because the app cannot store it exactly.
 
 In a string, you can use these special codes:
 
@@ -356,7 +363,13 @@ If you use an `int` and a `float` together, the result is a `float`.
 
 If you divide an `int` by an `int`, the result is a whole number. The app removes the part after the decimal point. For example, `7 / 2` gives `3`, but `7.0 / 2.0` gives `3.5`.
 
-If you divide by zero, the program stops with a runtime error.
+To get a decimal result, write one of the numbers with a decimal point. For example, `7 / 2.0` gives `3.5`.
+
+If you divide by zero, the program stops with a `Division by zero` error. This is true for `/` and for `%`.
+
+An `int` result must stay exact. If `+`, `-` or `*` gives an `int` above 9007199254740991 or below -9007199254740991, the program stops with an `Integer overflow` error. A `float` has no such check.
+
+The remainder `%` takes the sign of the left number. For example, `-7 % 3` is `-1`.
 
 You can join two strings with `+`. You cannot join a string and a number. `"a" + 1` gives an error.
 
@@ -414,7 +427,7 @@ print("done")
 
 This program prints `5`, `4`, `3`, `2`, `1` and then `done`.
 
-Make sure that the condition becomes false at some point. If it does not, the loop does not stop. The app stops a program after 8000 steps.
+Make sure that the condition becomes false at some point. If it does not, the loop does not stop. A step is one TAC instruction. The app stops a program after 10,000,000 steps and shows an error.
 
 ### For loops
 
@@ -453,6 +466,14 @@ print(xs)
 - To change an item, write `xs[1] = 99`.
 - `print(xs)` prints the full list: `[10, 99, 30]`.
 - The number in the square brackets must be an `int`.
+- A valid index is from `0` to the number of items minus one. Any other index gives a `Runtime` error. For example, `xs[3]` gives an error when `xs` has three items.
+- You cannot add an item with an index. `xs[3] = 1` gives an error when `xs` has three items.
+- A list is a value. After `let b: list = a`, a change to `b` does not change `a`.
+- A list can hold lists. For example, `m[1][0]` reads the first item of the second list in `m`.
+- You cannot change an item inside a nested list. `m[1][0] = 5` gives an error. Build a new list instead.
+- Two lists are equal when they have the same items. For example, `[1, 2] == [1, 2]` is `true`.
+- You can use list items in math, comparisons and conditions. The app cannot know the type of a list item before the program runs. It checks the type while the program runs. A wrong type gives a `Runtime` error.
+- If you divide a list item, the result is a decimal number.
 
 ### Functions
 
@@ -473,10 +494,13 @@ This program prints `11`.
 - In the round brackets, give each input a name and a type.
 - After `->`, give the type of the result. If the function gives no result, do not write `->`.
 - Use `return` to send the result back.
-- Write the function before the line that uses it.
-- A function can read and change the variables of the main program. A `let` inside a function makes a new variable that only the function can use.
+- A function that gives a result must return a value on every path. A `while` loop does not count, because the loop can run zero times.
+- Define a function at the top level of the program. You cannot define a function inside another function, a loop or an `if`.
+- You can call a function before or after its definition. Two functions can call each other.
+- A function can read and change the variables of the main program. It can use only the variables that you declare above it. A `let` inside a function makes a new variable that only the function can use.
+- A function cannot see the local variables of the function that called it.
 - When you call a function, give the correct number of inputs.
-- A function can call itself. The "Factorial" sample program shows this.
+- A function can call itself. The "Factorial" sample program shows this. A chain of calls can be 1,000 calls deep at most.
 
 ### Input
 
@@ -498,28 +522,50 @@ Each error has a stage name. The stage name tells you which part of the compiler
 | Syntax | The parser found tokens in an order that the grammar does not allow |
 | Semantic | The program has a correct form, but it does not make sense (for example, a wrong type) |
 | Runtime | A problem occurred while the program ran |
+| Limit | The program, or the number of errors, is too large for the compiler |
+| Internal | The compiler failed in an unexpected way. This is a bug in PiGPL |
 
-If your program has an error before the Execute stage, the program does not run.
+If your program has a Lexical, Syntax or Semantic error, the program does not run.
 
-Some errors cause more errors after them. Always correct the first error first. Then click **Compile** again.
+Some errors cause more errors after them. For example, the app removes an invalid character, and the code around it can then break a grammar rule. Always correct the first error first. Then click **Compile** again. The app shows 100 errors at most.
 
 ### Common errors and how to correct them
 
 | Message | Cause | How to correct it |
 |---|---|---|
 | `Invalid character '@'` | The program contains a character that PiGPL does not use | Remove the character |
-| `Unterminated string literal` | A string has no closing `"` | Add the closing `"` on the same line |
-| `Expected ... found ...` | A part of the statement is missing or in the wrong place | Compare the line with the examples in this guide |
-| `Unexpected token ...` | The parser did not expect this token here | Check the line and the line before it |
-| `Undeclared identifier: y` | You used `y` before you declared it | Add `let y: int = ...` above that line |
+| `Invalid character '!' (use 'not' ...)` | The character belongs to another language. The message in brackets names the PiGPL form | Use the form that the message names |
+| `Invalid character U+00A0 (a non-breaking space ...)` | An invisible character came in with copied text | Replace it with a normal space |
+| `Unterminated string literal (add a closing " ...)` | A string has no closing `"` | Add the closing `"` on the same line |
+| `Integer literal ... is too large` | A whole number is above 9007199254740991 | Use a smaller number |
+| `Expected ')' to close 'print(', found ...` | A part of the statement is missing or in the wrong place | Add the part that the message names |
+| `Expected '}' to close the block opened at line 3` | A block has no closing `}` | Add the `}` |
+| `Unexpected '}': there is no matching '{'` | A `}` has no `{` before it | Remove the `}` or add the `{` |
+| `'else' has no matching 'if'` | An `else` or `elif` does not follow an `if` block | Move it behind the `if` block |
+| `A statement cannot start with '5'` | A line starts with a token that no statement uses | Start the line with `let`, `if`, `while`, `for`, `fn`, `return`, `print` or a name |
+| `print() takes exactly one value` | `print` got two values | Join the values with `+` |
+| `Code is nested too deeply` | Brackets or blocks are more than 100 levels deep | Split the code into steps |
+| `Expression is nested too deeply` | One expression chains more than 1,000 operators | Split the expression into steps |
+| `Undeclared identifier: cuont (did you mean 'count'?)` | You used a name before you declared it, or you made a typing error | Declare the name, or correct the spelling |
 | `Identifier 'x' is already declared` | You used `let` two times for `x` | Use `x = ...` for the second value |
-| `Type mismatch in declaration ...` | The value does not agree with the type | Change the type or the value |
-| `Condition must be bool, found int` | An `if` or `while` condition is a number | Use a comparison, for example `x > 0` |
+| `Type mismatch in declaration of 'x': expected int, found float ...` | A decimal value does not fit in an `int` variable | Declare the variable as `float` |
+| `Condition must be bool, found int (use a comparison ...)` | An `if` or `while` condition is a number | Use a comparison, for example `x > 0` |
 | `Operator '+' requires numeric operands ...` | You added a number to text | Use two numbers, or two strings |
-| `Function expected 2 argument(s), got 1` | A call has the wrong number of inputs | Give the correct number of inputs |
-| `Division by zero` | The number after `/` or `%` is `0` | Make sure that the number is not `0` |
+| `Function 'add' expects 2 arguments but got 1` | A call has the wrong number of inputs | Give the correct number of inputs |
+| `Function 'f' must return a value of type int on every path` | Some path through the function has no `return` | Add a `return` at the end of the function |
+| `Functions can only be defined at the top level ...` | A function is inside another function, a loop or an `if` | Move the function to the top level |
+| `print() needs a value, but this function call returns nothing` | You printed the result of a function that gives no result | Print a value instead |
+| `Only a list variable can be changed by index ...` | You wrote `m[0][1] = 5` | Build a new list instead |
 | `return outside of a function` | A `return` is not inside a function | Remove the `return`, or move it into a function |
-| `Execution stopped after 8000 steps (possible infinite loop)` | The program ran for too long. A loop may not stop. | Make sure the loop condition becomes false |
+| `Division by zero` | The number after `/` or `%` is `0` | Make sure that the number is not `0` |
+| `Integer overflow: the result does not fit in an int` | `+`, `-` or `*` gave an `int` above 9007199254740991 or below -9007199254740991 | Use a `float`, or use smaller numbers |
+| `List index 3 is out of range. The list has 3 items, so valid indexes are 0 to 2.` | The index is outside the list | Use an index that the message names as valid |
+| `Operator '+' needs two numbers or two strings, found number and string` | A list item has a different type than you expected | Check the items of the list |
+| `Maximum call depth of 1,000 exceeded ...` | A function calls itself without a stop | Add a case that ends the calls |
+| `Output limit of 10,000 lines reached ...` | The program prints too many lines | Check for a loop that never ends |
+| `Execution stopped after 10,000,000 steps (possible infinite loop)` | The program ran for too long. A loop may not stop. | Make sure the loop condition becomes false |
+| `Source is too large ...` | The program has more than 250,000 characters | Split the program |
+| `Too many errors (250); showing the first 100 ...` | The program has more than 100 errors | Correct the first errors and compile again |
 
 ## Save and export your work
 
@@ -546,17 +592,22 @@ Use the example menu above the editor to load a sample program.
 | Lexical error | A character that PiGPL does not use |
 | Syntax error | A declaration that has no value |
 | Semantic error | A name that has no declaration |
+| Runtime error | A list index past the end of the list |
 
 ## Known limits
 
 The app has these limits:
 
-- **A list index outside the list gives `0`.** For example, if `xs` is `[1, 2]`, then `xs[5]` gives `0`. The app does not show an error for it.
+- **Size limits.** A program can have 250,000 characters at most. Brackets and blocks can be 100 levels deep. One expression can chain 1,000 operators. A chain of calls can be 1,000 deep. A program can print 10,000 lines and run 10,000,000 steps. The app shows 100 errors at most.
+- **The range of an `int`.** An `int` is exact from -9007199254740991 to 9007199254740991. A result outside this range gives an `Integer overflow` error.
+- **A float with a whole value prints without `.0`.** For example, `print(2.0)` prints `2`.
+- **Division of a list item gives a decimal result.** The app cannot know before the run if the item is an `int`.
+- **A function can use only the variables declared above it.** A function can call any top-level function, before or after its definition.
+- **You cannot change an item inside a nested list.** `m[0][1] = 5` gives an error.
 - **`input()` always gives empty text.** The app does not ask you to type.
 - **`print` shows only one value.**
 - **There is no way to change a number into text.**
-- **A program can run for 8000 steps at most.**
-- **The "Lexical error" sample shows two errors.** The lexer removes the bad character. The parser then finds `10 5`, which is also an error.
+- **One mistake can cause more than one error.** The "Lexical error" sample shows two errors. The lexer removes the bad character. The parser then finds `10 5`, which is also an error.
 
 ## Project files
 
@@ -578,12 +629,15 @@ src/
 │   ├── examples.ts           The sample programs and the grammar rules
 │   ├── export.ts             Makes the Report and JSON files
 │   ├── types.ts              Shared data shapes and the list of stages
-│   └── pipeline.test.ts      Tests for the compiler
+│   ├── pipeline.test.ts      Basic tests for the compiler
+│   └── robustness.test.ts    Tests with valid, invalid, boundary, error and complex input
 ├── components/compiler/      The screen parts
 │   ├── studio.tsx            The main screen: editor, tabs and replay bar
 │   ├── stage-views.tsx       The view for each stage tab
 │   └── ast-tree.tsx          Draws the AST diagram
 └── lib/studio-store.ts       Keeps the state of the app (program, result, replay position)
+
+scripts/benchmark.mjs         Measures the time and memory of the compiler (npm run bench)
 ```
 
 ## Commands
@@ -595,6 +649,7 @@ Run these commands in a terminal in the project folder:
 | `npm install` | Installs the packages (one time only) |
 | `npm run dev` | Starts the app at <http://localhost:8080> |
 | `npm test` | Runs all the tests |
+| `npm run bench` | Measures the time and memory of the compiler (see the change report) |
 | `npm run typecheck` | Checks the TypeScript code for type errors |
 | `npm run lint` | Checks the code style |
 | `npm run build` | Makes the final version of the app for a web server |
@@ -620,3 +675,236 @@ Run these commands in a terminal in the project folder:
 | Label | A name such as `L0` that marks a place in the TAC |
 | Optimizer | The part of the compiler that makes the TAC shorter |
 | Declare | To make a new name with `let` or `fn` |
+| Runtime error | An error that happens while the program runs |
+| Overflow | A result that is too large to store exactly |
+| Step | One TAC instruction that the app runs |
+| Benchmark | A test that measures speed and memory use |
+
+## Project documentation: change report
+
+This section records the work on testing, error messages and performance. It lists what the work found, what changed, and how to repeat each check. It is for people who maintain the compiler.
+
+### Summary
+
+| Area | Before | After |
+|---|---|---|
+| Automatic tests | 71 | 169. The new file `src/compiler/robustness.test.ts` holds 98 of them |
+| Input that crashed the compiler | Deep or long input threw an uncaught error | None. The compiler returns a clear error |
+| Problems in the compiler | 20 found (see the problem table) | All 20 corrected |
+| Error messages | Token names and wrong positions in many messages | Plain words, exact positions and hints |
+| Compile time of 5,000 declarations | About 206 ms | About 106 ms |
+| Step limit of one run | 8,000 | 10,000,000 |
+| Memory of 128,000 characters | 47 MB | 47 MB. A size limit now bounds it |
+| Type check, lint, tests and build | All passed | All pass |
+
+### 1. Testing
+
+The tests call `compile()` with one program and check the output, the errors, or both. The expected results come from the language rules in this guide. The work began with a probe of about 60 small programs. The probe showed which parts of the compiler were wrong. The tests then set the expected result of each case before the code changed.
+
+The tests are in `src/compiler/robustness.test.ts`. The `test` script in `package.json` runs them.
+
+| Group | Tests | What the group covers |
+|---|---|---|
+| Valid inputs | 15 | Empty programs, line endings, every type of value, precedence, division, strings, lists, loops, functions |
+| Scope rules | 5 | Global and local variables, recursion, loop variables |
+| Invalid input: lexical errors | 6 | Position, hints, emoji, unterminated strings, large numbers |
+| Invalid input: syntax errors | 12 | Wording, position, one error for one mistake, no token names |
+| Invalid input: semantic errors | 16 | Names, types, calls, returns, nested functions, lists |
+| Boundary cases | 17 | Largest `int`, overflow, first and last index, empty lists, nesting limits, size limit |
+| Runtime error conditions | 9 | Division by zero, wrong types, endless loops, endless recursion, output limit |
+| Complex programs | 10 | Sorting, a prime sieve, gcd, Collatz, Fibonacci, binary search, nested lists |
+| Pipeline invariants | 5 | Links between events and results, repeatable results, 400 random programs, 560 damaged copies of the samples |
+| Performance | 3 | Compile time, growth with program size, a 100,000-iteration loop |
+
+The random programs and the damaged samples must meet four rules. No call throws. No result has an `Internal` error. Every event link is valid. Every lexical, syntax and semantic error has a line and a column.
+
+#### Problems found and corrected
+
+| # | Input | Before | After |
+|---|---|---|---|
+| 1 | `print(((((…1…)))))` with 1,200 levels, or `1+1+…` with 3,000 terms | An uncaught `RangeError` stopped the compiler | A `Syntax` error: `Code is nested too deeply`. A safety net also catches any other crash |
+| 2 | A function prints a global `x`, and another function with its own `x` calls it | Printed the caller's `x` (`2`) | Prints the global `x` (`1`) |
+| 3 | A function defined inside another function | The inner body ran at the wrong time. The output was wrong | A `Semantic` error |
+| 4 | A function with a result that has a path without `return` | Gave `0` without a message | A `Semantic` error |
+| 5 | `print(f())` when `f` gives no result | Printed `0` | A `Semantic` error |
+| 6 | `let x: int = 1.5` | Stored `1.5` in an `int` | A `Semantic` error with a hint |
+| 7 | `[1, 2] == [1, 2]` | `false` | `true` |
+| 8 | `s = s + v` with a list item `v`, or `m[1][0]` | Rejected: `requires numeric operands, found int and unknown` and `Cannot index type unknown` | Accepted. The executor checks the types. A wrong type, such as `xs[0] + "a"` with a number in `xs[0]`, gives a `Runtime` error |
+| 9 | `xs[5]` or `xs[-1]` on a list of two items | Gave `0` | A `Runtime` error that names the valid indexes |
+| 10 | `xs[7] = 1` on a list of two items | Made the list `[1, 2, , , , , , 1]` | A `Runtime` error |
+| 11 | A loop of 1,000 iterations, `fib(20)`, a loop that prints 5,000 lines | Rejected after 8,000 steps | Runs. The limit is 10,000,000 steps |
+| 12 | `print(!true)` | Reported a `Lexical` error and then ran the program | The program does not run after a lexical or syntax error |
+| 13 | `print(99999999999999999999)` | Printed `100000000000000000000` | A `Lexical` error |
+| 14 | `print(9007199254740991 + 2)` | Printed `9007199254740992`, which is wrong | An `Integer overflow` error |
+| 15 | A source with an emoji | Two errors with broken half characters | One error that shows the emoji |
+| 16 | A missing `)` at the end of the program | Error at line 1, column 1 | Error at the end of the program |
+| 17 | `print(1, 2)` | Two errors that named token types | One error that explains `print` |
+| 18 | `m[0][1] = 5` | An error with a misleading message: `Indexed assignment requires a list` | An error that explains that nested assignment is not supported |
+| 19 | Two functions that call each other, or a call before the definition | `Undeclared identifier` | Works. The compiler declares all top-level functions first |
+| 20 | A source of 5,000 invalid characters | 5,000 errors | 100 errors and a `Too many errors` message |
+
+The "Before" column shows the code of commit `5629f17`. Two earlier corrections are not in this table. They come from the first review round, before that commit. They are a function that changes a global variable, and the `int / int` division with the `Division by zero` error. Every "Before" result in the table comes from a run of that code.
+
+### 2. Error messages
+
+These rules shaped each message:
+
+- **Use plain words.** A message names the problem. It does not name a token type such as `RPAREN`.
+- **Point at the exact place.** An error at the end of the program points at the end of the last line.
+- **Say what is valid.** A range error names the valid indexes.
+- **Give a hint for a common mistake.** The hints cover these characters: `!`, `&`, `|`, `'`, `;` and a leading `.`. They also cover curly quotes, a non-breaking space and a byte-order mark.
+- **Suggest a name.** An unknown name shows the closest declared name when one is close.
+- **Name the function.** A call error names the function that you called.
+- **Report one mistake one time.** A second error at the same token does not appear.
+- **Show the line.** The Errors tab shows the source line with a `^` mark.
+
+| Input | Before | After |
+|---|---|---|
+| `print(1` | `Expected RPAREN, found EOF` at line 1, column 1 | `Expected ')' to close 'print(', found the end of the program` at line 1, column 8 |
+| `if true {` with no `}` | `Expected '}' to close block` at line 1, column 1 | `Expected '}' to close the block opened at line 1, found the end of the program` at the last line |
+| `5 + 3` | `Unexpected token '5' (INTEGER)` | `A statement cannot start with '5'. A statement starts with let, if, while, for, fn, return, print, a name, or a call` |
+| `x` | `Unexpected identifier 'x' — expected assignment or call` | `'x' is not a statement. Use 'x = value' to assign, 'x(...)' to call, or 'let x: type = value' to declare` |
+| `print(cuont)` | `Undeclared identifier: cuont` | `Undeclared identifier: cuont (did you mean 'count'?)` |
+| `add(1)` | `Function expected 2 argument(s), got 1` | `Function 'add' expects 2 arguments but got 1` |
+| `if 1 {` | `Condition must be bool, found int` | `Condition must be bool, found int (use a comparison such as x > 0)` |
+| `return` with no value in a function with a result | `Function must return int` | `Function 'f' must return a value of type int, but this return has no value` |
+| `print(!true)` | `Invalid character '!'` | `Invalid character '!' (use 'not' to negate a condition, or '!=' to compare two values)` |
+| An emoji | `Invalid character '\ud83d'` and `'\ude00'` | `Invalid character '😀'` |
+| `print('hi')` | `Invalid character '''` and `Undeclared identifier: hi` | Two errors that say `strings use double quotes` |
+| `xs[5]` | No message. It gave `0` | `List index 5 is out of range. The list has 2 items, so valid indexes are 0 to 1.` |
+| `m[0][1] = 5` | `Indexed assignment requires a list` | `Only a list variable can be changed by index, as in xs[0] = 1. Changing an item inside a nested list is not supported` |
+| An endless loop | `Execution stopped after 8000 steps` | `Execution stopped after 10,000,000 steps (possible infinite loop)` |
+
+### 3. Performance
+
+#### Method
+
+`npm run bench` compiles 13 generated programs. It runs each program 7 times and reports the median time. It then measures the memory that the result keeps after a garbage collection. The same script ran on the original code (commit `5629f17`) and on the new code, on one machine with Node v24.18.0. Times change from run to run by up to 20 percent. The compile-time rows below use the median of 4 repeated runs.
+
+#### Compile time and memory
+
+| Program | Time before | Time after | Memory before | Memory after |
+|---|---|---|---|---|
+| 1,000 declarations (23,792 characters) | About 29 ms | About 19 ms | 10.5 MB | 10.5 MB |
+| 5,000 declarations (127,793 characters) | About 206 ms | About 106 ms | 47.2 MB | 47.0 MB |
+
+#### Execution
+
+| Program | Before | After |
+|---|---|---|
+| Loop that sums 1,000 numbers | Error at 8,000 steps | Runs in 0.9 ms |
+| Loop that sums 100,000 numbers | Error at 8,000 steps | Runs in 25 ms |
+| `fib(10)` | 1.3 ms | 0.8 ms |
+| `fib(20)` | Error at 8,000 steps | Runs in 10 ms |
+| `fib(27)` | Error at 8,000 steps | Runs in 439 ms |
+| List of 300 items, sum in a loop | `Semantic` error | Runs in 3.6 ms |
+| 5,000 print lines | Error at 8,000 steps | Runs in 2.9 ms |
+| Endless `while true` loop | Stopped at 8,000 steps | Stopped at 10,000,000 steps after 261 ms |
+
+The executor runs 20 to 40 million steps each second. The slower figure is a loop that calls a function.
+
+#### Where the time went
+
+The per-phase timing of 5,000 declarations showed the cause. The semantic phase took 85 to 135 ms, which is about half of the compile time. Each lookup of a name scanned every symbol that the program declared before. After the change, the semantic phase takes 8 to 10 ms. The optimizer is now the largest phase, at about 70 ms.
+
+#### What changed for speed
+
+- **Symbol table.** One map for each scope replaces the scan. A lookup now costs one read for each open scope.
+- **Lexer.** Character tests use character codes, not regular expressions.
+- **Optimizer.** `parseConst` and `isTemp` return early for ordinary names.
+- **Executor, constants.** The executor parses constant operands one time, before the run. It no longer parses them on each step.
+- **Executor, variables.** A lookup reads two maps: the current frame and the global frame. Before, it walked every frame on the stack. This change also corrected problem 2.
+- **Executor, memory.** The recorded trace keeps the first 5,000 steps and every print. A long run no longer fills memory with one object for each step.
+
+#### Accuracy
+
+- `int / int` gives an `int`. The new `//` instruction does this division.
+- `+`, `-` and `*` on `int` values stop with `Integer overflow` when the result is not exact. The optimizer does not fold such a result, so it cannot hide the error.
+- Lists compare by content.
+- A literal above 9007199254740991 gives an error.
+
+#### Limits and why
+
+| Limit | Value | Reason |
+|---|---|---|
+| Steps in one run | 10,000,000 | The run takes under half a second on the test machine, and the page waits for it |
+| Depth of calls | 1,000 | The frame stack must not grow without bound. A depth of 990 runs |
+| Printed lines | 10,000 | Each line becomes one event in the replay |
+| Recorded trace | 5,000 steps | Memory must not grow with the number of steps |
+| Depth of brackets and blocks | 100 | The stack overflowed at 1,200 levels in the test. The limit keeps a wide margin |
+| Operators in one expression | 1,000 | The stack overflowed at 3,000 terms in the test. The limit keeps a margin of 3 times |
+| Characters in a source | 250,000 | The replay events of 128,000 characters use 47 MB. 250,000 characters need about 92 MB (scaled from this value) |
+| Reported errors | 100 | A long run of invalid characters must not flood the screen |
+
+#### Not changed
+
+- **The optimizer.** It is now the slowest phase. Its work grows in step with the program size. This work does not change it.
+- **The memory of replay events.** The replay needs one event for each action. This is the main feature of the app, and it uses most of the memory.
+- **List updates.** An update copies the list, so a list stays a value. The cost of one update grows with the length of the list.
+
+### 4. Changes in behavior
+
+These changes can make a program that worked before fail, or give it a different output. Most changes make the compiler report a mistake that it hid before.
+
+1. An `int` variable no longer accepts a decimal value.
+2. A function reads the global variable, not a variable of the function that called it.
+3. A function inside another function, a loop or an `if` is an error.
+4. A function with a result must return a value on every path.
+5. `print(f())` is an error when `f` gives no result.
+6. A list index outside the list is a `Runtime` error. It gave `0` before.
+7. A lexical error now stops the compile. The TAC and Optimize tabs stay empty for such a program.
+8. The step limit is 10,000,000. The limits in the "Limits and why" table are new.
+9. `compile()` never throws. It returns an error with the phase `Limit` or `Internal`.
+10. The error phase has two new values: `Limit` and `Internal`.
+11. Many messages have new words. A script that matches an old message must change.
+12. A new sample program, "Runtime error", joins the 13 samples.
+
+### 5. Files changed
+
+| File | Change |
+|---|---|
+| `src/compiler/lexer.ts` | Character codes, hints, whole code points, integer range, shared error helper |
+| `src/compiler/parser.ts` | Plain messages, real end position, one error for one mistake, recovery from a stray `else`, nesting and depth limits |
+| `src/compiler/symbol-table.ts` | One map for each scope, `visibleNames()` |
+| `src/compiler/semantic.ts` | Unknown type, int and float rules, declared-first functions, nested functions, return paths, new messages, name suggestions |
+| `src/compiler/ir.ts` | The `//` instruction and the `assign` and `int` markers |
+| `src/compiler/optimizer.ts` | The `//` operator, no folding of an overflow, variables forgotten after a call, early returns |
+| `src/compiler/execute.ts` | New scope rules, constants parsed one time, run-time checks, limits, capped trace |
+| `src/compiler/pipeline.ts` | Stops after a front-end error, size limit, error limit, safety net |
+| `src/compiler/types.ts` | Two new error phases, a note on `Quad.args` |
+| `src/compiler/examples.ts` | The "Runtime error" sample |
+| `src/components/compiler/stage-views.tsx` | The source line and `^` mark in the Errors tab |
+| `src/compiler/robustness.test.ts` | New. 98 tests |
+| `scripts/benchmark.mjs` and `package.json` | New benchmark and the `npm run bench` script, new test file in `npm test` |
+| `README.md` | Updated guide and this report |
+
+### 6. Verification
+
+| Check | Command | Result |
+|---|---|---|
+| Tests | `npm test` | 169 of 169 pass |
+| Type check | `npm run typecheck` | 0 errors |
+| Lint | `npm run lint` | 0 errors and 0 warnings |
+| Production build | `npm run build` | Passes |
+| Browser check | `npm run dev` | The Errors tab shows the message, the line and the `^` mark. The console has no errors |
+| Benchmark | `npm run bench` | The tables in section 3 |
+
+### 7. How to repeat the checks
+
+```bash
+npm test            # all tests
+npm run typecheck   # type check
+npm run lint        # style check
+npm run bench       # time and memory
+```
+
+To compare with the original code, make an empty folder and run `git archive 5629f17 src/compiler | tar -x -C <folder>`. Copy `scripts/benchmark.mjs` into a `scripts` folder inside it. Run `node --expose-gc --experimental-strip-types scripts/benchmark.mjs` there.
+
+### 8. Known problems that remain
+
+- The optimizer is the slowest phase for large programs.
+- The replay events use most of the memory. A source of 250,000 characters needs about 92 MB.
+- One lexical error can cause later syntax errors.
+- A float with a whole value prints without `.0`.
+- A function can use only the variables that you declare above it.
+- `input()` returns empty text.
